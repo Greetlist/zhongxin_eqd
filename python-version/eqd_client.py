@@ -19,11 +19,25 @@ class EQDClient:
             "SHORTNAMEPY":"ShortName",
             "SECURITY_NAME":"SecurityName",
         }
+
+        self.blacklist_cols = ["ControlLevel", "Sid", "ExchangeId", "FinanceType", "TradeType", "SecurityName"]
+        self.blacklist_col_map = {
+            "CONTROL_LEVEL": "ControlLevel",
+            "INST_CODE": "Sid", 
+            "MARKET_TYPE": "ExchangeID",
+            "ASSET_TYPE": "FinanceType",
+            "TRADE_TYPE": "TradeType",
+            "INST_CODE_NAME": "SecurityName",
+        }
+
         if os.path.exists(config_file):
             self.config.read(config_file)
         else:
             print("config_file: [{}] not exists".format(config_file))
             sys.exit(1)
+
+    def init(self):
+        self.login()
 
     def login(self):
         url = self.config.get("ACCOUNT", "host") + "/public/login"
@@ -37,7 +51,6 @@ class EQDClient:
         self.auth_code = res.json()["RESULTSET"][0]["AUTHORIZATION"]
 
     def query_pool(self):
-        self.login()
         url = self.config.get("ACCOUNT", "host") + "/eqd/public/get_quota_summary_list"
         head = {
             "USER_ID": self.config.get("ACCOUNT", "username"),
@@ -47,19 +60,35 @@ class EQDClient:
         }
         res = requests.post(url=url, headers=head)
         ret_json = res.json()
+        self.dump_result(ret_json, "loan_list.csv")
+
+    def query_blacklist(self):
+        url = self.config.get("ACCOUNT", "host") + "/eqd/public/get_eqd_blacklist_fast"
+        head = {
+            "Authorization": "Bearer " + self.auth_code,
+        }
+        res = requests.post(url=url, headers=head)
+        ret_json = res.json()
+        self.dump_result(ret_json, "blacklist.csv")
+
+    def dump_result(self, ret_json, csv_name):
         if ret_json["RET_CODE"] != 0:
             print("Request Error")
             return
         if ret_json["TOTAL_COUNT"] == 0:
-            df = pd.DataFrame(colums=self.loan_cols)
+            df = pd.DataFrame(colums=self.blacklist_cols)
         else:
             df = pd.DataFrame(ret_json["RESULTSET"])
-            df = df.rename(columns=self.loan_col_map)
-        df.to_csv('test.csv', index=False)
+            df = df.rename(columns=self.blacklist_col_map)
+        tmp_csv = csv_name + '.tmp'
+        df.to_csv(tmp_csv, index=False)
+        os.rename(tmp_csv, csv_name)
 
-def query_pool():
+def query():
     c = EQDClient()
+    c.init()
     c.query_pool()
+    c.query_blacklist()
 
 if __name__ == '__main__':
-    argh.dispatch_commands([query_pool])
+    argh.dispatch_commands([query])
