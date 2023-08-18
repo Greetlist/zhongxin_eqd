@@ -44,6 +44,7 @@ class EQDClient:
         self.req_order_id = self.load_req_order_id()
 
         self.target_pos_df = self.load_target_pos_df()
+        self.insert_for_last_target_pos = False
 
     def init(self):
         self.login()
@@ -156,8 +157,7 @@ class EQDClient:
             order_list.append(single_order)
         return order_list
 
-    def insert_orders(self, origin_order_list):
-        # update target first
+    def update_target_pos(self, origin_order_list):
         for order in origin_order_list:
             if len(self.target_pos_df.loc[self.target_pos_df["Uid"] == order["Uid"], "ReqLocateCount"]) > 0:
                 self.target_pos_df.loc[self.target_pos_df["Uid"] == order["Uid"], "ReqLocateCount"] = order["ReqLocateCount"]
@@ -165,7 +165,11 @@ class EQDClient:
                 cur_df = pd.DataFrame([order])
                 cur_df["LocateCount"] = 0
                 self.target_pos_df = pd.concat([self.target_pos_df, cur_df])
+        self.insert_for_last_target_pos = False
 
+    def insert_orders(self):
+        if self.insert_for_last_target_pos:
+            return
         order_list = self.gen_order_list()
         order_per_second = int(self.config.get("LIMIT", "order_per_second"))
         total_round = int(len(order_list) / order_per_second) + 1
@@ -174,6 +178,7 @@ class EQDClient:
                 self.quota_order(order)
             time.sleep(1)
         self.dump_req_order_id()
+        self.insert_for_last_target_pos = True
 
     def query_orders(self):
         url = self.config.get("ACCOUNT", "host") + "/eqd/public/get_quota_order_list"
@@ -241,8 +246,8 @@ class EQDClient:
 def query():
     c = EQDClient()
     c.init()
-    c.query_pool()
     c.get_party_info()
+    c.query_pool()
     orders = [
         {"Uid": "000100-SZ-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-18"},
         #{"Uid": "601009-SH-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-18"},
