@@ -89,7 +89,10 @@ class EQDClient:
     def dump_result(self, ret_json, csv_name):
         if ret_json["RET_CODE"] != 0:
             print("Request Error")
-            return
+            return None
+        if "black" not in csv_name and ret_json["TOTAL_COUNT"] < 1000:
+            return None
+
         if ret_json["TOTAL_COUNT"] == 0:
             df = pd.DataFrame(colums=self.blacklist_cols) if "black" in csv_name else pd.DataFrame(colums=self.loan_cols)
         else:
@@ -247,7 +250,11 @@ def query():
     c = EQDClient()
     c.init()
     c.get_party_info()
-    c.query_pool()
+    while True:
+        res = c.query_pool()
+        if res is not None:
+            break
+        time.sleep(5)
     orders = [
         {"Uid": "000100-SZ-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-18"},
         #{"Uid": "601009-SH-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-18"},
