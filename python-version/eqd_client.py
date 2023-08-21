@@ -146,17 +146,6 @@ class EQDClient:
         res = requests.post(url=url, headers=head)
         print(res.text)
 
-    def gen_order_list(self):
-        unfinish_df = self.target_pos_df[self.target_pos_df["ReqLocateCount"] != self.target_pos_df["LocateCount"]]
-        order_list = []
-        for item in unfinish_df.to_records("dict"):
-            single_order = SingleOrder()
-            single_order.inst_id, single_order.exchange_id, _ = item["Uid"].split("-")
-            single_order.order_volume = item["ReqLocateCount"] - item["LocateCount"]
-            single_order.trade_date = item["TradeDate"]
-            order_list.append(single_order)
-        return order_list
-
     def update_target_pos(self, origin_order_list):
         for order in origin_order_list:
             if len(self.target_pos_df.loc[self.target_pos_df["Uid"] == order["Uid"], "ReqLocateCount"]) > 0:
@@ -179,6 +168,17 @@ class EQDClient:
             time.sleep(1)
         self.dump_req_order_id()
         self.insert_for_last_target_pos = True
+
+    def gen_order_list(self):
+        unfinish_df = self.target_pos_df[self.target_pos_df["ReqLocateCount"] >= self.target_pos_df["LocateCount"]]
+        order_list = []
+        for item in unfinish_df.to_records("dict"):
+            single_order = SingleOrder()
+            single_order.inst_id, single_order.exchange_id, _ = item["Uid"].split("-")
+            single_order.order_volume = item["ReqLocateCount"] - item["LocateCount"]
+            single_order.trade_date = item["TradeDate"]
+            order_list.append(single_order)
+        return order_list
 
     def query_orders(self):
         url = self.config.get("ACCOUNT", "host") + "/eqd/public/get_quota_order_list"
