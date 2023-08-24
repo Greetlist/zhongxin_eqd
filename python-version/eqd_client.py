@@ -34,16 +34,21 @@ class EQDClient:
             "INST_CODE_NAME": "SecurityName",
         }
 
+        self.today_str = dt.datetime.now().strftime("%Y-%m-%d")
+        self.req_file_name = 'output/{}_order_index.txt'.format(dt.datetime.now().strftime("%Y%m%d"))
+        self.target_pos_path = "input/{}_target.csv".format(dt.datetime.now().strftime("%Y%m%d"))
+        self.init_pos_path = "input/{}_init.csv".format(dt.datetime.now().strftime("%Y%m%d"))
+        self.order_outside_status = [-1, 0, 1] #待审核,待报,已报
+
         if os.path.exists(config_file):
             self.config.read(config_file)
         else:
             print("config_file: [{}] not exists".format(config_file))
             sys.exit(1)
-        self.today_str = dt.datetime.now().strftime("%Y-%m-%d")
-        self.req_file_name = 'output/{}_order_index.txt'.format(dt.datetime.now().strftime("%Y%m%d"))
-        self.req_order_id = self.load_req_order_id()
 
-        self.target_pos_df = self.load_target_pos_df()
+        self.req_order_id = self.load_req_order_id()
+        self.init()
+        self.target_pos_df = self.init_target_pos_df()
         self.insert_for_last_target_pos = False
 
     def init(self):
@@ -83,7 +88,7 @@ class EQDClient:
         self.black_df = self.dump_result(ret_json, "blacklist.csv")
 
     def get_loan_rate(self, inst_id, exchange_id):
-        uid = inst_id + "-" + self.convert_exchange2local(exchange_id) + "-stock"
+        uid = inst_id + "-" + exchange_id + "-stock"
         return self.loan_df.loc[self.loan_df["Uid"] == uid, "LoanRate"].values[0]
 
     def dump_result(self, ret_json, csv_name):
@@ -157,6 +162,7 @@ class EQDClient:
                 cur_df = pd.DataFrame([order])
                 cur_df["LocateCount"] = 0
                 self.target_pos_df = pd.concat([self.target_pos_df, cur_df])
+        self.dump_target_pos_df()
         self.insert_for_last_target_pos = False
 
     def insert_orders(self):
@@ -176,14 +182,18 @@ class EQDClient:
         unfinish_df = self.target_pos_df[self.target_pos_df["ReqLocateCount"] >= self.target_pos_df["LocateCount"]]
         order_list = []
         for item in unfinish_df.to_records("dict"):
+            order_volume = item["ReqLocateCount"] - item["LocateCount"] - item["OutSideCount"]
+            if order_volume <= 0:
+                continue
             single_order = SingleOrder()
             single_order.inst_id, single_order.exchange_id, _ = item["Uid"].split("-")
-            single_order.order_volume = item["ReqLocateCount"] - item["LocateCount"]
+            single_order.order_volume = order_volume
             single_order.trade_date = item["TradeDate"]
             order_list.append(single_order)
+            self.target_pos_df.loc[self.target_pos_df["Uid"] == item["Uid"], "OutSideCount"] = order_volume
         return order_list
 
-    def query_orders(self):
+    def query_orders(self, update_target_pos_df=True):
         url = self.config.get("ACCOUNT", "host") + "/eqd/public/get_quota_order_list"
         head = {
             "USER_ID": self.config.get("ACCOUNT", "username"),
@@ -198,13 +208,50 @@ class EQDClient:
             "TRADE_DATE":"null"
         }
         res = requests.post(url=url, headers=head, json=data)
+        res_list = res.json().get("RESULTSET", [])
 
-        res_list = res.json()["RESULTSET"]
-        self.target_pos_df["LocateCount"] = 0
-        for res in res_list:
-            uid = res["INST_CODE"] + "-" + self.convert_exchange2local(res["MARKET_TYPE"]) + "-stock"
-            self.target_pos_df.loc[self.target_pos_df["Uid"] == uid, "LocateCount"] += int(res["DEAL_COUNT"])
-        self.dump_target_pos_df()
+        if update_target_pos_df:
+            self.target_pos_df["LocateCount"] = 0
+            for res in res_list:
+                uid = res["INST_CODE"] + "-" + self.convert_exchange2local(res["MARKET_TYPE"]) + "-stock"
+                if res["ORDER_STATUS"] == 3:
+                    self.target_pos_df.loc[self.target_pos_df["Uid"] == uid, "LocateCount"] += int(res["DEAL_COUNT"])
+                    self.target_pos_df.loc[self.target_pos_df["Uid"] == uid, "OutSideCount"] -= int(res["DEAL_COUNT"])
+        return res_list
+
+    def query_position(self):
+        url = self.config.get("ACCOUNT", "host") + "/eqd/public/get_quota_order_list"
+        head = {
+            "USER_ID": self.config.get("ACCOUNT", "username"),
+            "Authorization": self.auth_code
+        }
+        data = {
+            "CONTRACT_ID": self.config.get("ACCOUNT", "contract_id")
+        }
+        res = requests.post(url=url, headers=head, json=data)
+        res_list = res.json().get("RESULTSET", [])
+        print('*'*50)
+        print(res_list)
+        print('*'*50)
+
+    def query_init(self):
+        url = self.config.get("ACCOUNT", "host") + "/eqd/public/get_swap_position"
+        head = {
+            "USER_ID": self.config.get("ACCOUNT", "username"),
+            "Authorization": self.auth_code
+        }
+        data = {
+            "CONTRACT_ID": self.config.get("ACCOUNT", "contract_id")
+        }
+        res = requests.post(url=url, headers=head, json=data)
+        return res.json().get("RESULTSET", [])
+
+    def get_init_pos(self):
+        if not os.path.exists(self.init_pos_path):
+            print("init_pos file is not exists!")
+            sys.exit(1)
+        df = pd.read_csv(self.init_pos_path)
+        return df.to_dict("records")
 
     def load_req_order_id(self):
         if os.path.exists(self.req_file_name):
@@ -232,37 +279,60 @@ class EQDClient:
             return "SH"
         return "SZ"
 
-    def load_target_pos_df(self):
-        target_pos_path = "input/{}_target.csv".format(dt.datetime.now().strftime("%Y%m%d"))
-        if os.path.exists(target_pos_path):
-            df = pd.read_csv(target_pos_path)
-        else:
-            df = pd.DataFrame(columns=["Uid", "ReqLocateCount", "LocateCount","TradeDate"])
+    def init_target_pos_df(self):
+        init_pos_list = self.get_init_pos()
+        pos_data_list = []
+        for init_pos in init_pos_list:
+            pos_data_list.append({
+                "Uid": init_pos["Uid"],
+                "ReqLocateCount": abs(init_pos["NetPos"]),
+                "LocateCount": abs(init_pos["NetPos"]),
+                "OutSideCount": 0,
+                "TradeDate": self.today_str,
+            })
+        df = pd.DataFrame(pos_data_list)
+
+        order_list = self.query_orders(False)
+        for order in order_list:
+            uid = order["INST_CODE"] + "-" + self.convert_exchange2local(order["MARKET_TYPE"]) + "-stock"
+            order_volume = int(order["DEAL_COUNT"])
+            if len(df.loc[df["Uid"] == uid, "ReqLocateCount"]) == 0:
+                cur_data = [{
+                    "Uid": uid,
+                    "ReqLocateCount": order_volume,
+                    "LocateCount": order_volume,
+                    "OutSideCount": 0,
+                    "TradeDate": self.today_str,
+                }]
+                df.concat([df, df.DataFrame(cur_data)])
+            elif order["ORDER_STATUS"] == 3: #全成
+                df.loc[df["Uid"] == uid, "ReqLocateCount"] += order_volume
+                df.loc[df["Uid"] == uid, "LocateCount"] += order_volume
+            elif order["ORDER_STATUS"] in self.order_outside_status:
+                df.loc[df["Uid"] == uid, "ReqLocateCount"] += order_volume
+                df.loc[df["Uid"] == uid, "OutSideCount"] += order_volume
         return df
 
     def dump_target_pos_df(self):
-        target_pos_path = "input/{}_target.csv".format(dt.datetime.now().strftime("%Y%m%d"))
-        tmp_path = target_pos_path + '.tmp'
+        tmp_path = self.target_pos_path + '.tmp'
         self.target_pos_df.to_csv(tmp_path, index=False)
-        os.rename(tmp_path, target_pos_path)
+        os.rename(tmp_path, self.target_pos_path)
 
 def query():
     c = EQDClient()
     c.init()
     c.get_party_info()
-    while True:
-        res = c.query_pool()
-        if res is not None:
-            break
-        time.sleep(5)
+    res = c.query_pool()
     orders = [
-        {"Uid": "000100-SZ-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-18"},
-        #{"Uid": "601009-SH-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-18"},
-        #{"Uid": "300059-SZ-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-18"},
-        #{"Uid": "688608-SH-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-18"},
+        {"Uid": "000100-SZ-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-24"},
+        #{"Uid": "601009-SH-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-24"},
+        #{"Uid": "300059-SZ-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-24"},
+        #{"Uid": "688608-SH-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-24"},
     ]
-    c.insert_orders(orders)
-    c.query_orders()
+    c.update_target_pos(orders)
+    c.insert_orders()
+    #c.query_orders()
+    c.query_position()
 
 if __name__ == '__main__':
     argh.dispatch_commands([query])
