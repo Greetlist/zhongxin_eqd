@@ -34,7 +34,6 @@ class EQDClient:
             "INST_CODE_NAME": "SecurityName",
         }
 
-        self.outside_order_dict = dict()
         self.today_str = dt.datetime.now().strftime("%Y-%m-%d")
         self.req_file_name = 'output/{}_order_index.txt'.format(dt.datetime.now().strftime("%Y%m%d"))
         self.target_pos_path = "input/{}_target.csv".format(dt.datetime.now().strftime("%Y%m%d"))
@@ -110,6 +109,12 @@ class EQDClient:
         return df
 
     def quota_order(self, single_order):
+        print(
+            "inst: {}, exchange: {}, volume: {}, trade_date: {}".format(
+                single_order.inst_id, single_order.exchange_id,
+                single_order.order_volume, single_order.trade_date,
+            )
+        )
         url = self.config.get("ACCOUNT", "host") + "/eqd/public/put_quota_set_order"
         head = {
             "USER_ID": self.config.get("ACCOUNT", "username"),
@@ -139,15 +144,8 @@ class EQDClient:
         res = requests.post(url=url, headers=head, json=data)
         res_json = res.json()
         if res_json["RET_CODE"] != 0:
-            print(
-                "-----[inst: {}, exchange: {}, volume: {}, trade_date: {}]-----".format(
-                    single_order.inst_id, single_order.exchange_id,
-                    single_order.order_volume, single_order.trade_date,
-                )
-            )
             print(res_json["RET_MESSAGE"])
-        else:
-            self.outside_order_dict[res["ORDER_ID"]] = 1
+        print(res.text)
 
     def get_party_info(self):
         url = self.config.get("ACCOUNT", "host") + "/eqd/public/get_party_info"
@@ -186,7 +184,7 @@ class EQDClient:
         unfinish_df = self.target_pos_df[self.target_pos_df["ReqLocateCount"] > self.target_pos_df["LocateCount"]]
         order_list = []
         for item in unfinish_df.to_records("dict"):
-            order_volume = item["ReqLocateCount"] - item["LocateCount"] - item["OutSideCount"]
+            order_volume = item["ReqLocateCount"] - item["LocateCount"]
             if order_volume <= 0:
                 continue
             single_order = SingleOrder()
@@ -194,7 +192,6 @@ class EQDClient:
             single_order.order_volume = order_volume
             single_order.trade_date = item["TradeDate"]
             order_list.append(single_order)
-            self.target_pos_df.loc[self.target_pos_df["Uid"] == item["Uid"], "OutSideCount"] = order_volume
         return order_list
 
     def query_orders(self):
@@ -213,17 +210,22 @@ class EQDClient:
         }
         res = requests.post(url=url, headers=head, json=data)
         res_list = res.json().get("RESULTSET", [])
-        return res_list
 
-    def update_target_df(self, order_list):
-        for res in order_list:
-            print(res)
+        order_data = []
+        for res in res_list:
             uid = res["INST_CODE"] + "-" + self.convert_exchange2local(res["MARKET_TYPE"]) + "-stock"
-            if res["ORDER_STATUS"] == '3' and res.get("ORDER_ID", "") in self.outside_order_dict:
-                self.target_pos_df.loc[self.target_pos_df["Uid"] == uid, "LocateCount"] += res["DEAL_COUNT"]
-                self.target_pos_df.loc[self.target_pos_df["Uid"] == uid, "OutSideCount"] -= res["DEAL_COUNT"]
-                del self.outside_order_dict[res["ORDER_ID"]]
+            if res["ORDER_STATUS"] == '3':
+                order_data.append({
+                    "Uid": uid,
+                    "LocateCount": res["DEAL_COUNT"]
+                })
+        order_df = pd.DataFrame(order_data)
+        order_df = order_df.groupby("Uid").sum().reset_index()
+
+        for item in order_df.to_dict("records"):
+            self.target_pos_df.loc[self.target_pos_df["Uid"] == item["Uid"], "LocateCount"] += item["LocateCount"]
         self.dump_target_pos_df()
+        return res_list
 
     def query_position(self):
         url = self.config.get("ACCOUNT", "host") + "/eqd/public/get_swap_position"
@@ -294,7 +296,6 @@ class EQDClient:
                 "Uid": init_pos["Uid"],
                 "ReqLocateCount": abs(init_pos["NetPos"]),
                 "LocateCount": abs(init_pos["NetPos"]),
-                "OutSideCount": 0,
                 "TradeDate": self.today_str,
             })
         self.target_pos_df = pd.DataFrame(pos_data_list)
@@ -308,7 +309,6 @@ class EQDClient:
                     "Uid": uid,
                     "ReqLocateCount": order_volume,
                     "LocateCount": order_volume,
-                    "OutSideCount": 0,
                     "TradeDate": self.today_str,
                 }]
                 self.target_pos_df = pd.concat([self.target_pos_df, pd.DataFrame(cur_data)])
@@ -317,8 +317,7 @@ class EQDClient:
                 self.target_pos_df.loc[self.target_pos_df["Uid"] == uid, "LocateCount"] += order_volume
             elif order["ORDER_STATUS"] in self.order_outside_status:
                 self.target_pos_df.loc[self.target_pos_df["Uid"] == uid, "ReqLocateCount"] += order_volume
-                self.target_pos_df.loc[self.target_pos_df["Uid"] == uid, "OutSideCount"] += order_volume
-        self.dump_target_pos_df()
+        print(self.target_pos_df)
 
     def dump_target_pos_df(self):
         tmp_path = self.target_pos_path + '.tmp'
@@ -327,17 +326,20 @@ class EQDClient:
 
 def query():
     c = EQDClient()
+    c.init()
+    c.get_party_info()
     res = c.query_pool()
     orders = [
-        {"Uid": "603938-SH-stock", "ReqLocateCount": 20000, "TradeDate": "2023-08-24"},
-        #{"Uid": "601009-SH-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-24"},
-        #{"Uid": "300059-SZ-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-24"},
+        #{"Uid": "002142-SZ-stock", "ReqLocateCount": 4000, "TradeDate": "2023-08-24"},
+        #{"Uid": "603105-SH-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-24"},
+        #{"Uid": "300059-SZ-stock", "ReqLocateCount": 4000, "TradeDate": "2023-08-24"},
         #{"Uid": "688608-SH-stock", "ReqLocateCount": 2000, "TradeDate": "2023-08-24"},
+        {"Uid": "000553-SZ-stock", "ReqLocateCount": 14000, "TradeDate": "2023-08-24"},
     ]
     c.update_target_pos(orders)
     c.insert_orders()
-    order_list = c.query_orders()
-    c.update_target_df(order_list)
+    for order in c.query_orders():
+        print(order)
     #c.query_position()
 
 if __name__ == '__main__':

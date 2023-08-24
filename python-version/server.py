@@ -11,7 +11,6 @@ config.read("conf/account.ini")
 
 app = Flask(__name__)
 client = EQDClient()
-client.get_party_info()
 scheduler = APScheduler()
 scheduler.init_app(app)
 #rpc_client = 
@@ -24,16 +23,6 @@ def insert_orders():
     client.update_target_pos(req_json["orders"])
     return {"return_code": 0, "msg": "Success"}
 
-@app.route('/query_init', methods=['POST'])
-def query_init():
-    client.query_init()
-
-@app.route('/get_current_status', methods=['POST'])
-def get_current_status():
-    pass
-    #return_df = client.target_pos_df[""]
-    #rpc_client().return_res(return_df)
-
 @app.route('/query_loan', methods=['POST'])
 def query_loan():
     retry_count = 5
@@ -45,13 +34,17 @@ def query_loan():
         retry_count -= 1
         if retry_count <= 0:
             break
+    return {"return_code": 0, "msg": "Success", "data": res.to_dict("records")}
+
+@app.route('/query_orders', methods=['POST'])
+def query_orders():
+    order_list = client.query_orders()
+    client.update_target_df(order_list)
+    return {"return_code": 0, "msg": "Success", "data": df.to_dict("records")}
 
 @scheduler.task('interval', id='do_insert_orders', seconds=2, misfire_grace_time=900)
 def do_insert_orders():
     client.insert_orders()
-    client.query_orders()
-    #return_df = client.target_pos_df[""]
-    #rpc_client().return_res(return_df)
 
 if __name__ == '__main__':
     scheduler.start()
